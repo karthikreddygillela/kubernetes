@@ -1,0 +1,198 @@
+ssh -i "kubernetes.pem" ubuntu@ec2-13-126-43-49.ap-south-1.compute.amazonaws.com -- master
+ssh -i "kubernetes.pem" ubuntu@ec2-13-127-141-210.ap-south-1.compute.amazonaws.com -- node1
+ssh -i "kubernetes.pem" ubuntu@ec2-13-126-139-80.ap-south-1.compute.amazonaws.com -- node2
+ssh -i "kubernetes.pem" ubuntu@ec2-35-154-36-76.ap-south-1.compute.amazonaws.com -- etcd
+
+				Key notes
+==============================================================================
+---> etcd listens 2379 port
+---> upto 5000 nodes
+---> upto 150000 pods in cluster
+---> upto 300000 total containers 
+---> upto 100 pods per node
+
+==============================================================================
+Kubernetes setup from jenkins
+
+make changes in master and nodes
+---> add user to sudores file vi /etc/sudoers from root ubuntu ALL=(ALL) NOPASSWD:ALL
+---> ssh-keygen
+---> sudo passwd ubuntu
+==========================
+way 1 to add key to target
+==========================
+---> ssh-copy-id -i /home/ubuntu/.ssh/id_rsa.pub ubuntu@node(target node)
+=========================
+way2
+=========================
+---> copy id_rsa.pub key cat >> /.ssh/authorised_keys <<EOF KEY content EOF
+---> sudo vi /etc/ssh/sshd_config
+---> PermitRootLogin yes
+---> PasswordAuthentication yes
+---> service sshd restart
+---> service sshd status
+============================================================================
+			installing kubectl
+============================================================================
+---> curl -LO https://storage.googleapis.com/kubernetes-release/release/`curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt`/bin/linux/amd64/kubectl
+---> chmod +x ./kubectl
+---> sudo mv ./kubectl /usr/local/bin/kubectl
+---> kubectl version --client
+ 				(OR)
+===========================================================================
+			Using debain packages(ubuntu)
+============================================================================
+sudo apt-get update && sudo apt-get install -y apt-transport-https
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee -a /etc/apt/sources.list.d/kubernetes.list
+sudo apt-get update
+sudo apt-get install -y kubectl
+===========================================================================
+			Using packages(cedntos)
+============================================================================
+cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+EOF
+yum install -y kubectl
+===========================================================================
+	Certifcates generation to secure ssh between servers
+===========================================================================
+
+# Create private key for CA
+openssl genrsa -out ca.key 2048
+
+# Create CSR using the private key
+openssl req -new -key ca.key -subj "/CN=KUBERNETES-CA" -out ca.csr
+
+# Self sign the csr using its own private key
+openssl x509 -req -in ca.csr -signkey ca.key -CAcreateserial  -out ca.crt -days 1000
+
+================> to generate kubernetes admin certificates<==========================
+
+# Generate private key for admin user
+openssl genrsa -out admin.key 2048
+
+# Generate CSR for admin user. Note the OU.
+openssl req -new -key admin.key -subj "/CN=admin/O=system:masters" -out admin.csr
+
+# Sign certificate for admin user using CA servers private key
+openssl x509 -req -in admin.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out admin.crt -days 1000
+
+===================>The Controller Manager Client Certificate<============================
+
+openssl genrsa -out kube-controller-manager.key 2048
+openssl req -new -key kube-controller-manager.key -subj "/CN=system:kube-controller-manager" -out kube-controller-manager.csr
+openssl x509 -req -in kube-controller-manager.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out kube-controller-manager.crt -days 1000
+
+====================>The Kube Proxy Client Certificate<=====================================
+openssl genrsa -out kube-proxy.key 2048
+openssl req -new -key kube-proxy.key -subj "/CN=system:kube-proxy" -out kube-proxy.csr
+openssl x509 -req -in kube-proxy.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out kube-proxy.crt -days 1000
+
+===================>The Scheduler Client Certificate<=======================================
+openssl genrsa -out kube-scheduler.key 2048
+openssl req -new -key kube-scheduler.key -subj "/CN=system:kube-scheduler" -out kube-scheduler.csr
+openssl x509 -req -in kube-scheduler.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out kube-scheduler.crt -days 1000
+
+========================> The Kubernetes API Server Certificate <==============================
+cat > openssl.cnf <<EOF
+[req]
+req_extensions = v3_req
+distinguished_name = req_distinguished_name
+[req_distinguished_name]
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = kubernetes
+DNS.2 = kubernetes.default
+DNS.3 = kubernetes.default.svc
+DNS.4 = kubernetes.default.svc.cluster.local
+IP.1 = 10.96.0.1
+IP.2 = 192.168.5.11
+IP.3 = 192.168.5.12
+IP.4 = 192.168.5.30
+IP.5 = 127.0.0.1
+EOF
+
+openssl genrsa -out kube-apiserver.key 2048
+openssl req -new -key kube-apiserver.key -subj "/CN=kube-apiserver" -out kube-apiserver.csr -config openssl.cnf
+openssl x509 -req -in kube-apiserver.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out kube-apiserver.crt -extensions v3_req -extfile openssl.cnf -days 1000
+
+============================> The ETCD Server Certificate <=================================
+
+cat > openssl-etcd.cnf <<EOF
+[req]
+req_extensions = v3_req
+distinguished_name = req_distinguished_name
+[req_distinguished_name]
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectAltName = @alt_names
+[alt_names]
+IP.1 = 192.168.5.11
+IP.2 = 192.168.5.12
+IP.3 = 127.0.0.1
+EOF
+
+openssl genrsa -out etcd-server.key 2048
+openssl req -new -key etcd-server.key -subj "/CN=etcd-server" -out etcd-server.csr -config openssl-etcd.cnf
+openssl x509 -req -in etcd-server.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out etcd-server.crt -extensions v3_req -extfile openssl-etcd.cnf -days 1000
+
+===================================> The Service Account Key Pair <=====================================
+
+openssl genrsa -out service-account.key 2048
+openssl req -new -key service-account.key -subj "/CN=service-accounts" -out service-account.csr
+openssl x509 -req -in service-account.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out service-account.crt -days 1000
+
+============================> Distribute the Certificates <============================================
+
+for instance in master-1 master-2; do
+  scp ca.crt ca.key kube-apiserver.key kube-apiserver.crt \
+    service-account.key service-account.crt \
+    etcd-server.key etcd-server.crt \
+    ${instance}:~/
+done
+
+for instance in  172.31.18.48 172.31.28.111; do
+  scp kube-proxy.kubeconfig ${instance}:~/
+done
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+jenkins installation
+
+--> sudo apt-get install openjdk-8-jre
+--> sudo apt-get install openjdk-8-jre-headless
+--> wget -q -O - https://pkg.jenkins.io/debian-stable/jenkins.io.key | sudo apt-key add -
+--> add this file into deb https://pkg.jenkins.io/debian-stable binary/ path /etc/apt/sources.list
+--> sudo apt-get update
+--> sudo apt-get install jenkins -y
+--> sudo service jenkins start
